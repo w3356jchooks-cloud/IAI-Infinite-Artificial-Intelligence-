@@ -2,21 +2,36 @@
 const OPENROUTER_API_KEY = "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";
 const CUSTOM_API_KEY = "sk-IAI-infinite-key";
 
-// Switch to a specific reliable model to avoid raw safety outputs from openrouter/free
-const MAIN_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
+// The 10 chat models you talk with, looping continuously from 1 to 10 and back to 1
+const CHAT_MODEL_POOL = [
+    "meta-llama/llama-3.3-70b-instruct:free",     // AI 1
+    "google/gemma-4-31b-it:free",                // AI 2
+    "deepseek/deepseek-chat:free",               // AI 3
+    "qwen/qwen-2.5-72b-instruct:free",           // AI 4
+    "mistralai/mistral-large:free",              // AI 5
+    "cohere/command-r-plus:free",                // AI 6
+    "microsoft/phi-3-medium-128k-instruct:free", // AI 7
+    "anthropic/claude-3-haiku:free",             // AI 8
+    "openai/gpt-4o-mini:free",                   // AI 9
+    "nvidia/nemotron-3-nano-30b-a3b:free"        // AI 10
+];
 
-const SNIPER_MODELS = [
+// The 3 dedicated sniper models for background compression
+const SNIPER_POOL = [
     "nvidia/nemotron-3-nano-30b-a3b:free",
     "google/gemma-4-31b-it:free",
     "meta-llama/llama-3.3-70b-instruct:free"
 ];
 
+let chat_model_index = 0;
 let sniper_index = 0;
 let active_session_log = [];
 
-// --- OPENROUTER API CALLER ---
+// --- OPENROUTER API CALLER (WITH CORS PROXY) ---
 async function call_openrouter(model_name, messages) {
-    const url = "https://openrouter.ai/api/v1/chat/completions";
+    const targetUrl = "https://openrouter.ai/api/v1/chat/completions";
+    const url = "https://corsproxy.io/?" + encodeURIComponent(targetUrl);
+    
     const headers = {
         "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
         "Content-Type": "application/json"
@@ -37,13 +52,15 @@ async function call_openrouter(model_name, messages) {
     return await response.json();
 }
 
-// --- CONTEXT SNIPER COMPRESSION ---
+// --- BACKGROUND SNIPER COMPRESSION ---
 async function run_sniper_compression(chat_history) {
-    const selected_sniper = SNIPER_MODELS[sniper_index];
+    const current_sniper = SNIPER_POOL[sniper_index];
+    sniper_index = (sniper_index + 1) % SNIPER_POOL.length;
+
     const sniper_payload = [
         { 
             role: "system", 
-            content: "You are a context sniper. Compress the chat transcript into a high-density System Briefing keeping all key rules, context, and data." 
+            content: "You are a context sniper. Compress the chat transcript into a high-density System Briefing keeping all rules, code, and variables intact." 
         },
         { 
             role: "user", 
@@ -52,17 +69,18 @@ async function run_sniper_compression(chat_history) {
     ];
 
     try {
-        const res = await call_openrouter(selected_sniper, sniper_payload);
-        const summary = res.choices[0].message.content;
-        sniper_index = (sniper_index + 1) % SNIPER_MODELS.length;
-        return summary;
+        const res = await call_openrouter(current_sniper, sniper_payload);
+        return res.choices[0].message.content;
     } catch (e) {
-        sniper_index = (sniper_index + 1) % SNIPER_MODELS.length;
-        return await run_sniper_compression(chat_history);
+        // If current sniper fails, rotate to the next sniper in the pool and retry once
+        sniper_index = (sniper_index + 1) % SNIPER_POOL.length;
+        const backup_sniper = SNIPER_POOL[sniper_index];
+        const res = await call_openrouter(backup_sniper, sniper_payload);
+        return res.choices[0].message.content;
     }
 }
 
-// --- MAIN CHAT HANDLER ---
+// --- MAIN CHAT HANDLER (Infinite Looping Pool + Sniper Hand-offs) ---
 async function handle_chat(payload, authorizationHeader) {
     if (!authorizationHeader || authorizationHeader !== `Bearer ${CUSTOM_API_KEY}`) {
         return { status: 401, data: { detail: "Unauthorized" } };
@@ -75,50 +93,52 @@ async function handle_chat(payload, authorizationHeader) {
 
     const latest_user_message = incoming_messages[incoming_messages.length - 1];
 
-    // Identity prompt to set persona and block metadata text
     const system_instruction = {
         role: "system",
         content: "You are IAI (Infinite Artificial Intelligence), an advanced AI created by your developer, William. Speak naturally, engage directly in conversation, and answer thoroughly. Never output system safety logs, metadata, moderation flags, or status texts under any circumstances."
     };
 
-    const full_messages = [system_instruction, ...active_session_log, latest_user_message];
+    active_session_log.push(latest_user_message);
 
-    try {
-        const response_data = await call_openrouter(MAIN_MODEL, full_messages);
-        
-        let clean_content = response_data.choices[0].message.content;
-        
-        // Strip out raw safety headers if an upstream provider still prepends them
-        clean_content = clean_content.replace(/^User Safety:.*$/gmi, '').trim();
+    let response_data = null;
+    let attempts = 0;
 
-        if (!clean_content) {
-            clean_content = "Hello! How can I help you today?";
+    // Try sending the request through the current chat model. If it fails, snipe history and loop to the next model.
+    while (attempts < CHAT_MODEL_POOL.length) {
+        const current_chat_model = CHAT_MODEL_POOL[chat_model_index];
+        const full_messages = [system_instruction, ...active_session_log];
+
+        try {
+            response_data = await call_openrouter(current_chat_model, full_messages);
+            break; // Success! Exit loop.
+        } catch (e) {
+            // Current model failed/used up. Pop latest message, run sniper compression on the history, 
+            // and advance to the next chat model in the loop (wrapping back to 0 if it hits 10).
+            if (active_session_log.length > 0) {
+                const failed_msg = active_session_log.pop();
+                const compressed_briefing = await run_sniper_compression(active_session_log);
+                active_session_log = [
+                    { role: "system", content: `SYSTEM CONTEXT BRIEFING:\n${compressed_briefing}` },
+                    failed_msg
+                ];
+            }
+
+            chat_model_index = (chat_model_index + 1) % CHAT_MODEL_POOL.length;
+            attempts++;
         }
-
-        response_data.choices[0].message.content = clean_content;
-        
-        active_session_log.push(latest_user_message);
-        active_session_log.push(response_data.choices[0].message);
-
-        return { status: 200, data: response_data };
-    } catch (e) {
-        if (active_session_log.length > 0) active_session_log.pop();
-
-        const briefing = await run_sniper_compression(active_session_log);
-        active_session_log = [
-            system_instruction,
-            { role: "system", content: `SYSTEM CONTEXT BRIEFING:\n${briefing}` },
-            latest_user_message
-        ];
-
-        const response_data = await call_openrouter(MAIN_MODEL, active_session_log);
-        
-        let clean_content = response_data.choices[0].message.content;
-        clean_content = clean_content.replace(/^User Safety:.*$/gmi, '').trim();
-        response_data.choices[0].message.content = clean_content;
-
-        active_session_log.push(response_data.choices[0].message);
-        return { status: 200, data: response_data };
     }
+
+    if (!response_data) {
+        throw new Error("All 10 chat models and sniper backups have been completely exhausted.");
+    }
+
+    let clean_content = response_data.choices[0].message.content;
+    clean_content = clean_content.replace(/^User Safety:.*$/gmi, '').trim();
+    if (!clean_content) clean_content = "Hello William! How can I help you with your project today?";
+
+    response_data.choices[0].message.content = clean_content;
+    active_session_log.push(response_data.choices[0].message);
+
+    return { status: 200, data: response_data };
 }
 
