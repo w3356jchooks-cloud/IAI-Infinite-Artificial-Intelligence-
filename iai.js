@@ -27,10 +27,10 @@ let chat_model_index = 0;
 let sniper_index = 0;
 let active_session_log = [];
 
-// --- OPENROUTER API CALLER (WITH CORS PROXY) ---
+// --- OPENROUTER API CALLER (STABLE ALLORIGINS CORS PROXY) ---
 async function call_openrouter(model_name, messages) {
     const targetUrl = "https://openrouter.ai/api/v1/chat/completions";
-    const url = "https://corsproxy.io/?" + encodeURIComponent(targetUrl);
+    const url = "https://api.allorigins.win/raw?url=" + encodeURIComponent(targetUrl);
     
     const headers = {
         "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
@@ -112,8 +112,8 @@ async function handle_chat(payload, authorizationHeader) {
             response_data = await call_openrouter(current_chat_model, full_messages);
             break; // Success! Exit loop.
         } catch (e) {
-            // Current model failed/used up. Pop latest message, run sniper compression on the history, 
-            // and advance to the next chat model in the loop (wrapping back to 0 if it hits 10).
+            // Current model failed/used up. Pop latest message, run sniper compression on history, 
+            // and advance to the next chat model in the loop (wrapping back around from 10 to 1).
             if (active_session_log.length > 0) {
                 const failed_msg = active_session_log.pop();
                 const compressed_briefing = await run_sniper_compression(active_session_log);
