@@ -27,11 +27,9 @@ let chat_model_index = 0;
 let sniper_index = 0;
 let active_session_log = [];
 
-// --- OPENROUTER API CALLER WITH RELIABLE CORS PROXY FALLBACK ---
+// --- DIRECT OPENROUTER API CALLER (NO EXTERNAL PROXIES) ---
 async function call_openrouter(model_name, messages) {
-    const targetUrl = "https://openrouter.ai/api/v1/chat/completions";
-    // Uses corsproxy.io wrapper to prevent "Failed to fetch" browser CORS errors
-    const url = "https://corsproxy.io/?" + encodeURIComponent(targetUrl);
+    const url = "https://openrouter.ai/api/v1/chat/completions";
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout guard
@@ -42,8 +40,8 @@ async function call_openrouter(model_name, messages) {
             headers: {
                 "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
                 "Content-Type": "application/json",
-                "HTTP-Referer": window.location.origin,
-                "X-Title": "IAI Chat"
+                "HTTP-Referer": window.location.href,
+                "X-Title": "IAI Infinite AI"
             },
             body: JSON.stringify({
                 model: model_name,
