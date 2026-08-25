@@ -236,20 +236,33 @@
             input.value = "";
             stream.scrollTop = stream.scrollHeight;
 
+            // Show loading bubble
+            const loadingId = "loading-" + Date.now();
+            stream.innerHTML += `<div id="${loadingId}" class="msg-ai" style="color:#8e9099; font-style:italic;">IAI is thinking...</div>`;
+            stream.scrollTop = stream.scrollHeight;
+
             const payload = { messages: [{ role: "user", content: text }] };
             const authHeader = "Bearer sk-IAI-infinite-key";
 
             try {
                 const response = await handle_chat(payload, authHeader);
+                
+                // Remove loading bubble
+                document.getElementById(loadingId).remove();
+
                 if (response.status === 200) {
                     const reply = response.data.choices[0].message.content;
                     stream.innerHTML += `<div class="msg-ai">${reply}</div>`;
                     saveChatToStorage(text, reply);
                 } else {
-                    stream.innerHTML += `<div class="msg-ai" style="color:#ff4444;">Error ${response.status}: Failed to reach gateway.</div>`;
+                    stream.innerHTML += `<div class="msg-ai" style="color:#ff4444;">API Error [${response.status}]: ${JSON.stringify(response.data)}</div>`;
                 }
             } catch (err) {
-                stream.innerHTML += `<div class="msg-ai" style="color:#ff4444;">System Error: ${err.message}</div>`;
+                // Remove loading bubble
+                document.getElementById(loadingId).remove();
+                
+                // Print exact error to screen
+                stream.innerHTML += `<div class="msg-ai" style="color:#ff4444;">Fetch Exception: ${err.message}</div>`;
             }
             stream.scrollTop = stream.scrollHeight;
         }
