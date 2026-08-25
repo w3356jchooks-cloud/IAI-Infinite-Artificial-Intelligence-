@@ -29,6 +29,7 @@
             flex: 1;
             overflow-y: auto;
             padding: 20px;
+            padding-bottom: 90px; /* Leaves space so text doesn't hide behind the fixed bar */
             display: flex;
             flex-direction: column;
             gap: 15px;
@@ -55,10 +56,15 @@
         }
 
         .input-container {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
             padding: 15px 20px;
             background-color: var(--bg-color);
             display: flex;
             justify-content: center;
+            border-top: 1px solid #222;
         }
 
         .input-pill {
@@ -175,7 +181,7 @@
         }
     </script>
 
-    <!-- Correctly links to your lowercase script file iai.js -->
+    <!-- Links your standalone lowercase script file iai.js -->
     <script src="iai.js"></script>
 </body>
 </html>
