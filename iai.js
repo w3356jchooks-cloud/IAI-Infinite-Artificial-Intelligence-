@@ -1,8 +1,10 @@
-// Environment / Config variables
+// --- CONFIGURATION ---
 const OPENROUTER_API_KEY = "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";
 const CUSTOM_API_KEY = "sk-IAI-infinite-key";
 
-const MAIN_MODEL = "openrouter/free";
+// Switch to a specific reliable model to avoid raw safety outputs from openrouter/free
+const MAIN_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
+
 const SNIPER_MODELS = [
     "nvidia/nemotron-3-nano-30b-a3b:free",
     "google/gemma-4-31b-it:free",
@@ -12,17 +14,14 @@ const SNIPER_MODELS = [
 let sniper_index = 0;
 let active_session_log = [];
 
-// Exact match: call_openrouter
+// --- OPENROUTER API CALLER ---
 async function call_openrouter(model_name, messages) {
     const url = "https://openrouter.ai/api/v1/chat/completions";
     const headers = {
         "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
         "Content-Type": "application/json"
     };
-    const payload = {
-        model: model_name,
-        messages: messages
-    };
+    const payload = { model: model_name, messages: messages };
 
     const response = await fetch(url, {
         method: "POST",
@@ -38,18 +37,17 @@ async function call_openrouter(model_name, messages) {
     return await response.json();
 }
 
-// Exact match: run_sniper_compression (with index rotation on error + recursive try)
+// --- CONTEXT SNIPER COMPRESSION ---
 async function run_sniper_compression(chat_history) {
     const selected_sniper = SNIPER_MODELS[sniper_index];
-    
     const sniper_payload = [
-        {
+        { 
             role: "system", 
-            content: "You are a context sniper. Compress the chat transcript into a high-density System Briefing keeping all rules, code, and variables."
+            content: "You are a context sniper. Compress the chat transcript into a high-density System Briefing keeping all key rules, context, and data." 
         },
-        {
+        { 
             role: "user", 
-            content: `TRANSCRIPT:\n${JSON.stringify(chat_history, null, 2)}`
+            content: `TRANSCRIPT:\n${JSON.stringify(chat_history, null, 2)}` 
         }
     ];
 
@@ -64,49 +62,62 @@ async function run_sniper_compression(chat_history) {
     }
 }
 
-// Exact match: Health Check (/ , /health , /healthz)
-function health_check() {
-    return { status: "IAI (Infinite Artificial Intelligence) Gateway Active" };
-}
-
-// Exact match: handle_chat (POST /v1/chat/completions logic)
+// --- MAIN CHAT HANDLER ---
 async function handle_chat(payload, authorizationHeader) {
-    // Check Authorization Header
     if (!authorizationHeader || authorizationHeader !== `Bearer ${CUSTOM_API_KEY}`) {
         return { status: 401, data: { detail: "Unauthorized" } };
     }
 
     const incoming_messages = payload.messages || [];
-    
-    // Check empty payload
     if (incoming_messages.length === 0) {
         return { status: 400, data: { detail: "Empty payload" } };
     }
 
     const latest_user_message = incoming_messages[incoming_messages.length - 1];
-    active_session_log.push(latest_user_message);
+
+    // Identity prompt to set persona and block metadata text
+    const system_instruction = {
+        role: "system",
+        content: "You are IAI (Infinite Artificial Intelligence), an advanced AI created by your developer, William. Speak naturally, engage directly in conversation, and answer thoroughly. Never output system safety logs, metadata, moderation flags, or status texts under any circumstances."
+    };
+
+    const full_messages = [system_instruction, ...active_session_log, latest_user_message];
 
     try {
-        const response_data = await call_openrouter(MAIN_MODEL, active_session_log);
-        const ai_reply = response_data.choices[0].message;
-        active_session_log.push(ai_reply);
-        return { status: 200, data: response_data };
+        const response_data = await call_openrouter(MAIN_MODEL, full_messages);
+        
+        let clean_content = response_data.choices[0].message.content;
+        
+        // Strip out raw safety headers if an upstream provider still prepends them
+        clean_content = clean_content.replace(/^User Safety:.*$/gmi, '').trim();
 
-    } catch (e) {
-        if (active_session_log.length > 0) {
-            active_session_log.pop();
+        if (!clean_content) {
+            clean_content = "Hello! How can I help you today?";
         }
 
-        const briefing = await run_sniper_compression(active_session_log);
+        response_data.choices[0].message.content = clean_content;
+        
+        active_session_log.push(latest_user_message);
+        active_session_log.push(response_data.choices[0].message);
 
+        return { status: 200, data: response_data };
+    } catch (e) {
+        if (active_session_log.length > 0) active_session_log.pop();
+
+        const briefing = await run_sniper_compression(active_session_log);
         active_session_log = [
+            system_instruction,
             { role: "system", content: `SYSTEM CONTEXT BRIEFING:\n${briefing}` },
             latest_user_message
         ];
 
         const response_data = await call_openrouter(MAIN_MODEL, active_session_log);
-        const ai_reply = response_data.choices[0].message;
-        active_session_log.push(ai_reply);
+        
+        let clean_content = response_data.choices[0].message.content;
+        clean_content = clean_content.replace(/^User Safety:.*$/gmi, '').trim();
+        response_data.choices[0].message.content = clean_content;
+
+        active_session_log.push(response_data.choices[0].message);
         return { status: 200, data: response_data };
     }
 }
