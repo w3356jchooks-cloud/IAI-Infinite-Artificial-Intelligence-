@@ -27,29 +27,43 @@ let chat_model_index = 0;
 let sniper_index = 0;
 let active_session_log = [];
 
-// --- OPENROUTER API CALLER (STABLE ALLORIGINS CORS PROXY) ---
+// --- OPENROUTER API CALLER WITH RELIABLE CORS PROXY FALLBACK ---
 async function call_openrouter(model_name, messages) {
     const targetUrl = "https://openrouter.ai/api/v1/chat/completions";
-    const url = "https://api.allorigins.win/raw?url=" + encodeURIComponent(targetUrl);
-    
-    const headers = {
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json"
-    };
-    const payload = { model: model_name, messages: messages };
+    // Uses corsproxy.io wrapper to prevent "Failed to fetch" browser CORS errors
+    const url = "https://corsproxy.io/?" + encodeURIComponent(targetUrl);
 
-    const response = await fetch(url, {
-        method: "POST",
-        headers: headers,
-        body: JSON.stringify(payload)
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout guard
 
-    if (response.status !== 200) {
-        const errorText = await response.text();
-        throw new Error(`OpenRouter Error (${response.status}): ${errorText}`);
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": window.location.origin,
+                "X-Title": "IAI Chat"
+            },
+            body: JSON.stringify({
+                model: model_name,
+                messages: messages
+            }),
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`OpenRouter Error (${response.status}): ${errorText}`);
+        }
+
+        return await response.json();
+    } catch (err) {
+        clearTimeout(timeoutId);
+        throw err;
     }
-
-    return await response.json();
 }
 
 // --- BACKGROUND SNIPER COMPRESSION ---
@@ -72,7 +86,7 @@ async function run_sniper_compression(chat_history) {
         const res = await call_openrouter(current_sniper, sniper_payload);
         return res.choices[0].message.content;
     } catch (e) {
-        // If current sniper fails, rotate to the next sniper in the pool and retry once
+        // Fallback to next sniper model if first attempt fails
         sniper_index = (sniper_index + 1) % SNIPER_POOL.length;
         const backup_sniper = SNIPER_POOL[sniper_index];
         const res = await call_openrouter(backup_sniper, sniper_payload);
@@ -80,7 +94,7 @@ async function run_sniper_compression(chat_history) {
     }
 }
 
-// --- MAIN CHAT HANDLER (Infinite Looping Pool + Sniper Hand-offs) ---
+// --- MAIN CHAT HANDLER ---
 async function handle_chat(payload, authorizationHeader) {
     if (!authorizationHeader || authorizationHeader !== `Bearer ${CUSTOM_API_KEY}`) {
         return { status: 401, data: { detail: "Unauthorized" } };
@@ -103,24 +117,26 @@ async function handle_chat(payload, authorizationHeader) {
     let response_data = null;
     let attempts = 0;
 
-    // Try sending the request through the current chat model. If it fails, snipe history and loop to the next model.
     while (attempts < CHAT_MODEL_POOL.length) {
         const current_chat_model = CHAT_MODEL_POOL[chat_model_index];
         const full_messages = [system_instruction, ...active_session_log];
 
         try {
             response_data = await call_openrouter(current_chat_model, full_messages);
-            break; // Success! Exit loop.
+            break; // Success!
         } catch (e) {
-            // Current model failed/used up. Pop latest message, run sniper compression on history, 
-            // and advance to the next chat model in the loop (wrapping back around from 10 to 1).
+            // If model fails or times out, trigger sniper compression and move to next model
             if (active_session_log.length > 0) {
                 const failed_msg = active_session_log.pop();
-                const compressed_briefing = await run_sniper_compression(active_session_log);
-                active_session_log = [
-                    { role: "system", content: `SYSTEM CONTEXT BRIEFING:\n${compressed_briefing}` },
-                    failed_msg
-                ];
+                try {
+                    const compressed_briefing = await run_sniper_compression(active_session_log);
+                    active_session_log = [
+                        { role: "system", content: `SYSTEM CONTEXT BRIEFING:\n${compressed_briefing}` },
+                        failed_msg
+                    ];
+                } catch (sniperError) {
+                    active_session_log.push(failed_msg);
+                }
             }
 
             chat_model_index = (chat_model_index + 1) % CHAT_MODEL_POOL.length;
@@ -129,7 +145,7 @@ async function handle_chat(payload, authorizationHeader) {
     }
 
     if (!response_data) {
-        throw new Error("All 10 chat models and sniper backups have been completely exhausted.");
+        throw new Error("All chat models in the pool failed to respond. Check network connection or API key status.");
     }
 
     let clean_content = response_data.choices[0].message.content;
