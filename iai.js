@@ -2,46 +2,44 @@
 const OPENROUTER_API_KEY = "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";
 const CUSTOM_API_KEY = "sk-IAI-infinite-key";
 
-// The 10 chat models you talk with, looping continuously from 1 to 10 and back to 1
+// Reliable 10-chat model pool
 const CHAT_MODEL_POOL = [
-    "meta-llama/llama-3.3-70b-instruct:free",     // AI 1
-    "google/gemma-4-31b-it:free",                // AI 2
-    "deepseek/deepseek-chat:free",               // AI 3
-    "qwen/qwen-2.5-72b-instruct:free",           // AI 4
-    "mistralai/mistral-large:free",              // AI 5
-    "cohere/command-r-plus:free",                // AI 6
-    "microsoft/phi-3-medium-128k-instruct:free", // AI 7
-    "anthropic/claude-3-haiku:free",             // AI 8
-    "openai/gpt-4o-mini:free",                   // AI 9
-    "nvidia/nemotron-3-nano-30b-a3b:free"        // AI 10
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "qwen/qwen-2.5-coder-32b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "google/gemma-2-27b-it:free",
+    "qwen/qwen-2.5-7b-instruct:free",
+    "deepseek/deepseek-r1:free",
+    "gryphe/mythomax-l2-13b:free",
+    "openchat/openchat-7b:free"
 ];
 
-// The 3 dedicated sniper models for background compression
+// Dedicated 3 sniper models for context compression
 const SNIPER_POOL = [
-    "nvidia/nemotron-3-nano-30b-a3b:free",
-    "google/gemma-4-31b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free"
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "qwen/qwen-2.5-7b-instruct:free"
 ];
 
 let chat_model_index = 0;
 let sniper_index = 0;
 let active_session_log = [];
 
-// --- DIRECT OPENROUTER API CALLER (NO EXTERNAL PROXIES) ---
+// --- OPENROUTER API CALLER ---
 async function call_openrouter(model_name, messages) {
     const url = "https://openrouter.ai/api/v1/chat/completions";
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout guard
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
 
     try {
         const response = await fetch(url, {
             method: "POST",
             headers: {
                 "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-                "Content-Type": "application/json",
-                "HTTP-Referer": window.location.href,
-                "X-Title": "IAI Infinite AI"
+                "Content-Type": "application/json"
             },
             body: JSON.stringify({
                 model: model_name,
@@ -54,7 +52,7 @@ async function call_openrouter(model_name, messages) {
 
         if (!response.ok) {
             const errorText = await response.text();
-            throw new Error(`OpenRouter Error (${response.status}): ${errorText}`);
+            throw new Error(`Status ${response.status}: ${errorText}`);
         }
 
         return await response.json();
@@ -72,7 +70,7 @@ async function run_sniper_compression(chat_history) {
     const sniper_payload = [
         { 
             role: "system", 
-            content: "You are a context sniper. Compress the chat transcript into a high-density System Briefing keeping all rules, code, and variables intact." 
+            content: "You are a context sniper. Compress the transcript into a concise briefing keeping all rules, code, and key facts intact." 
         },
         { 
             role: "user", 
@@ -84,7 +82,7 @@ async function run_sniper_compression(chat_history) {
         const res = await call_openrouter(current_sniper, sniper_payload);
         return res.choices[0].message.content;
     } catch (e) {
-        // Fallback to next sniper model if first attempt fails
+        // Fallback to next sniper if first fails
         sniper_index = (sniper_index + 1) % SNIPER_POOL.length;
         const backup_sniper = SNIPER_POOL[sniper_index];
         const res = await call_openrouter(backup_sniper, sniper_payload);
@@ -107,48 +105,54 @@ async function handle_chat(payload, authorizationHeader) {
 
     const system_instruction = {
         role: "system",
-        content: "You are IAI (Infinite Artificial Intelligence), an advanced AI created by your developer, William. Speak naturally, engage directly in conversation, and answer thoroughly. Never output system safety logs, metadata, moderation flags, or status texts under any circumstances."
+        content: "You are IAI (Infinite Artificial Intelligence), created by William. Speak naturally and directly."
     };
 
     active_session_log.push(latest_user_message);
 
     let response_data = null;
     let attempts = 0;
+    let lastError = null;
 
+    // Continuous loop through models until one responds
     while (attempts < CHAT_MODEL_POOL.length) {
         const current_chat_model = CHAT_MODEL_POOL[chat_model_index];
         const full_messages = [system_instruction, ...active_session_log];
 
         try {
             response_data = await call_openrouter(current_chat_model, full_messages);
-            break; // Success!
+            break; // Success! Exit loop.
         } catch (e) {
-            // If model fails or times out, trigger sniper compression and move to next model
-            if (active_session_log.length > 0) {
-                const failed_msg = active_session_log.pop();
-                try {
-                    const compressed_briefing = await run_sniper_compression(active_session_log);
-                    active_session_log = [
-                        { role: "system", content: `SYSTEM CONTEXT BRIEFING:\n${compressed_briefing}` },
-                        failed_msg
-                    ];
-                } catch (sniperError) {
-                    active_session_log.push(failed_msg);
-                }
-            }
-
+            console.warn(`Model ${current_chat_model} failed (${e.message}). Swapping to next model...`);
+            lastError = e;
+            
+            // Advance model index without letting sniper errors break the retry loop
             chat_model_index = (chat_model_index + 1) % CHAT_MODEL_POOL.length;
             attempts++;
         }
     }
 
+    // Optional: Compress history in background if conversation gets long (> 10 messages)
+    if (active_session_log.length > 10) {
+        try {
+            const compressed = await run_sniper_compression(active_session_log);
+            active_session_log = [
+                { role: "system", content: `CONTEXT BRIEFING:\n${compressed}` }
+            ];
+        } catch (e) {
+            console.warn("Background sniper compression skipped:", e);
+        }
+    }
+
     if (!response_data) {
-        throw new Error("All chat models in the pool failed to respond. Check network connection or API key status.");
+        // If all fail, reset session log message push so user can retry safely
+        active_session_log.pop();
+        throw new Error(`API Error: ${lastError ? lastError.message : "Connection failed"}`);
     }
 
     let clean_content = response_data.choices[0].message.content;
     clean_content = clean_content.replace(/^User Safety:.*$/gmi, '').trim();
-    if (!clean_content) clean_content = "Hello William! How can I help you with your project today?";
+    if (!clean_content) clean_content = "Hello William! How can I help you today?";
 
     response_data.choices[0].message.content = clean_content;
     active_session_log.push(response_data.choices[0].message);
