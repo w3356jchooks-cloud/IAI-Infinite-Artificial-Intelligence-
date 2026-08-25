@@ -2,7 +2,7 @@
 const OPENROUTER_API_KEY = "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";
 const CUSTOM_API_KEY = "sk-IAI-infinite-key";
 
-// Reliable 10-chat model pool
+// Active OpenRouter free models
 const CHAT_MODEL_POOL = [
     "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-2-9b-it:free",
@@ -13,10 +13,10 @@ const CHAT_MODEL_POOL = [
     "qwen/qwen-2.5-7b-instruct:free",
     "deepseek/deepseek-r1:free",
     "gryphe/mythomax-l2-13b:free",
-    "openchat/openchat-7b:free"
+    "qwen/qwen-2.5-14b-instruct:free"
 ];
 
-// Dedicated 3 sniper models for context compression
+// Active sniper models for context compression
 const SNIPER_POOL = [
     "meta-llama/llama-3.1-8b-instruct:free",
     "google/gemma-2-9b-it:free",
@@ -52,7 +52,7 @@ async function call_openrouter(model_name, messages) {
 
         if (!response.ok) {
             const errorText = await response.text();
-            throw new Error(`Status ${response.status}: ${errorText}`);
+            throw new Error(`HTTP ${response.status}: ${errorText}`);
         }
 
         return await response.json();
@@ -82,7 +82,6 @@ async function run_sniper_compression(chat_history) {
         const res = await call_openrouter(current_sniper, sniper_payload);
         return res.choices[0].message.content;
     } catch (e) {
-        // Fallback to next sniper if first fails
         sniper_index = (sniper_index + 1) % SNIPER_POOL.length;
         const backup_sniper = SNIPER_POOL[sniper_index];
         const res = await call_openrouter(backup_sniper, sniper_payload);
@@ -114,25 +113,27 @@ async function handle_chat(payload, authorizationHeader) {
     let attempts = 0;
     let lastError = null;
 
-    // Continuous loop through models until one responds
     while (attempts < CHAT_MODEL_POOL.length) {
         const current_chat_model = CHAT_MODEL_POOL[chat_model_index];
         const full_messages = [system_instruction, ...active_session_log];
 
         try {
             response_data = await call_openrouter(current_chat_model, full_messages);
-            break; // Success! Exit loop.
+            if (response_data && response_data.choices && response_data.choices.length > 0) {
+                break; // Valid response received!
+            } else {
+                throw new Error("Invalid choices payload");
+            }
         } catch (e) {
-            console.warn(`Model ${current_chat_model} failed (${e.message}). Swapping to next model...`);
+            console.warn(`Model ${current_chat_model} failed (${e.message}). Skipping...`);
             lastError = e;
             
-            // Advance model index without letting sniper errors break the retry loop
+            // Advance model index and continue loop automatically
             chat_model_index = (chat_model_index + 1) % CHAT_MODEL_POOL.length;
             attempts++;
         }
     }
 
-    // Optional: Compress history in background if conversation gets long (> 10 messages)
     if (active_session_log.length > 10) {
         try {
             const compressed = await run_sniper_compression(active_session_log);
@@ -145,18 +146,16 @@ async function handle_chat(payload, authorizationHeader) {
     }
 
     if (!response_data) {
-        // If all fail, reset session log message push so user can retry safely
         active_session_log.pop();
         throw new Error(`API Error: ${lastError ? lastError.message : "Connection failed"}`);
     }
 
     let clean_content = response_data.choices[0].message.content;
     clean_content = clean_content.replace(/^User Safety:.*$/gmi, '').trim();
-    if (!clean_content) clean_content = "Hello William! How can I help you today?";
+    if (!clean_content) clean_content = "Hello! How can I help you today?";
 
     response_data.choices[0].message.content = clean_content;
     active_session_log.push(response_data.choices[0].message);
 
     return { status: 200, data: response_data };
 }
-
